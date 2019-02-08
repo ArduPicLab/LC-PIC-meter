@@ -1,0 +1,147 @@
+program LCmeter;
+// program LC meter
+// print values of Lx or Cx on LCD 2x16display
+// Timer#1 as counter on PB6 with Interrupt on overflow
+// I/O configuration:
+// PortA.0..3 = LCD data (4 bit mode) (out)
+// PortB.3 = relay (out)
+// PortB.4 = LCD RS (out)
+// PortB.5 = LCD E (out)
+// PortB.6= Timer#1 input (in, rise front)
+// PortB.7=  C/L switch sense (in)
+// xtal = 16.00 MHz
+// by G. Carrera 23/07/2018
+const
+ C2: real = 1e-9;// calibration capacitor = 1nF
+ Pisq4: real = 39.47842;// 4*Pi^2
+
+var
+  F1, F2, F3: dword;// frequencies
+  overc: word;// T1 overflow counter
+  F1sq, F2sq, F3sq: real;  // squares of frequencies
+  C1, Cx, L1, Lx, K: real; // measured values
+  outstring: string[16];
+  i: integer;
+  txt : array[10] of char;
+  txtfl : array[23] of char;
+  counts: word;
+  Relay : sbit at RB3_bit;
+
+// Lcd module connections
+var LCD_RS : sbit at RB4_bit;
+var LCD_EN : sbit at RB5_bit;
+var LCD_D4 : sbit at RA0_bit;
+var LCD_D5 : sbit at RA1_bit;
+var LCD_D6 : sbit at RA2_bit;
+var LCD_D7 : sbit at RA3_bit;
+var LCD_RS_Direction : sbit at TRISB4_bit;
+var LCD_EN_Direction : sbit at TRISB5_bit;
+var LCD_D4_Direction : sbit at TRISA0_bit;
+var LCD_D5_Direction : sbit at TRISA1_bit;
+var LCD_D6_Direction : sbit at TRISA2_bit;
+var LCD_D7_Direction : sbit at TRISA3_bit;
+// End Lcd module connections
+
+procedure Interrupt();
+ begin
+  if PIR1.TMR1IF=1 then
+    begin  { Timer#1 overflow }
+      overc:= overc + 1;
+      PIR1.TMR1IF:=0; // clear Timer#1 interrupt flag
+    end;
+ end;
+
+
+function Frequency() : dword;
+// measure the number of cycles counted on 1000 milliseconds
+
+begin
+  overc:= 0;
+  TMR1H:= 0;// reset high byte of timer 1 (takes effect when low byte written)
+  TMR1L:= 0;// reset low byte of timer 1 (also loads in high byte now)
+  T1CON.TMR1ON:= 1;// Start counting: enable Timer#1
+  Delay_ms(1000);  // Delay one second
+  T1CON.TMR1ON:= 0;// Stop counting: disable Timer#1
+  result:= overc Shl 16;// combine overflow counter
+  counts:= TMR1H Shl 8;// read Timer#1 Hi counter
+  counts:= counts Or TMR1L;
+  result:= result Or counts; // add last counting;
+end;
+
+
+procedure IOinit;
+// initialize I/O
+begin
+  CMCON:= $07; // all digital outputs
+  TRISA.0:= 0;  // PORTA.0 output
+  TRISA.1:= 0;  // PORTA.1 output
+  TRISA.2:= 0;  // PORTA.2 output
+  TRISA.3:= 0;  // PORTA.3 output
+  TRISB:= $C7;  // PORTB  3,4,5 outputs
+  OPTION_REG.7:= 0;// pull-up enabled on port B
+  Relay:= 0;// relay off
+  PIE1.TMR1IE:=1; // Timer#1 overflow flag  enabled
+  Lcd_Init(); // Initialize LCD
+  Lcd_Cmd(_LCD_CLEAR);// Clear display
+  Delay_ms(100);
+  Lcd_Cmd(_LCD_CURSOR_OFF); // Turn off cursor
+  Lcd_Out(1, 1, 'LCmeter by GCar'); // Print text to LCD
+  Lcd_Out(2, 1, 'Calibration time'); // Print text to LCD
+  Delay_ms(2000);
+  T1CON := $02;   // no prescaler, ext. clock, sync, Stop T1
+  INTCON.PEIE:=1; // Enables peripheral interrupt
+  INTCON.GIE:= 1; // Enables global interrupt
+  PIR1.TMR1IF:=0;  // clear overflow bit.
+  F1:= 0; F2:= 0; F3:= 0;
+end;
+
+
+begin { Main program }
+  IOinit;
+  F1:= Frequency();// measure F1
+  Lcd_Cmd(_LCD_CLEAR);// Clear display
+  Lcd_Out(1, 1, 'F1= '); // Print text to LCD
+  Relay:= 1;// relay on, C2 is inserted for calibration
+  LongWordToStr(F1, txt);
+  ltrim(txt); // trims the leading spaces
+  Lcd_Out(1, 5, txt); // Print text to LCD
+  F2:= Frequency();// measure F2
+  Lcd_Out(2, 1, 'F2= '); // Print text to LCD
+  Relay:= 0;// relay off: end of calibration
+  LongWordToStr(F2, txt);
+  ltrim(txt); // trims the leading spaces
+  Lcd_Out(2, 5, txt); // Print text to LCD
+  Delay_ms(5000);
+  Lcd_Cmd(_LCD_CLEAR);// Clear display
+  F1sq:= real(F1)*real(F1); F2sq:= real(F2)*real(F2);
+  C1:=F2sq*C2/(F1sq-F2sq);// calculates the exact value of C1
+  L1:=1/(Pisq4*F1sq*C1);// calculates the exact value of L1
+  while true Do
+    begin {start of endless loop}
+      F3:= Frequency();// measure F3
+      Lcd_Out(1, 1, 'F3=             '); // Print text to LCD
+      LongWordToStr(F3, txt);
+      ltrim(txt); // trims the leading spaces
+      Lcd_Out(1, 5, txt); // Print text to LCD
+      F3sq:= real(F3)*real(F3);
+      K:=(F1sq/F3sq)-1.0;
+      if (TestBit(PORTB, 7)= 0) then // inductor measurement
+        begin
+          Lx:= K*L1*1e6;// uH
+          //FloatToStr_FixLen(Lx, txt, 8); troppo mangiabyte, non sta in memoria
+          FloatToStr(Lx, txtfl);
+          strncpy(txt,txtfl,9);// reduces the string to 9 characters
+          Lcd_Out(2, 1, 'L[uH]=          '); // Print text to LCD
+          Lcd_Out(2, 7, txt); // Print text to LCD
+        end
+      else
+        begin
+           Cx:= K*C1*1e9;// nF
+           FloatToStr(Cx, txtfl);
+           strncpy(txt,txtfl,9);// reduces the string to 9 characters
+           Lcd_Out(2, 1, 'C[nF]=          '); // Print text to LCD
+           Lcd_Out(2, 7, txt); // Print text to LCD
+         end;
+        Delay_ms(1000);
+    end;{end of endless loop}
+end.
